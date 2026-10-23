@@ -24,9 +24,32 @@ def client(app): return app.test_client()
 
 def csrf(client): return client.get('/api/auth/session').json['csrf_token']
 
-def signed(client,method,url,**kwargs):
-    headers=kwargs.pop('headers',{}); headers['X-CSRFToken']=csrf(client)
-    return client.open(url,method=method,headers=headers,**kwargs)
+
+
+
+def signed(client, method, url, **kwargs):
+    headers = kwargs.pop("headers", {}).copy()
+
+    before = client.get("/api/auth/session")
+    assert before.status_code == 200, (
+        f"CSRF session endpoint failed: {before.status_code}"
+    )
+
+    token = before.get_json()["csrf_token"]
+
+    with client.session_transaction() as sess:
+        stored_token = sess.get("csrf_token")
+        session_keys = sorted(sess.keys())
+
+    assert stored_token, (
+        f"CSRF token was not persisted after GET /api/auth/session. "
+        f"Session keys: {session_keys}"
+    )
+
+    headers["X-CSRFToken"] = token
+    return client.open(url, method=method, headers=headers, **kwargs)
+
+
 
 @pytest.fixture
 def admin(client):

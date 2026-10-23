@@ -1,49 +1,30 @@
-# Review resources and environment variables before creating this Blueprint.
+
 services:
   - type: web
     name: tarun-portfolio
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
-    preDeployCommand: flask --app app:create_app db upgrade
     startCommand: gunicorn --workers 2 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
     envVars:
       - key: APP_ENV
         value: production
+
       - key: SECRET_KEY
         generateValue: true
+
       - key: DATABASE_URL
-        fromDatabase:
-          name: tarun-portfolio-db
-          property: connectionString
+        sync: false
+
       - key: RATELIMIT_STORAGE_URI
-        fromService:
-          type: keyvalue
-          name: tarun-portfolio-cache
-          property: connectionString
+        value: memory://
+
       - key: STORAGE_BACKEND
-        value: s3
+        value: local
+
       - key: TRUST_PROXY
         value: "true"
+
       - key: SITE_URL
         sync: false
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_REGION
-        value: us-east-1
-      - key: S3_ENDPOINT_URL
-        sync: false
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
-        sync: false
-  - type: keyvalue
-    name: tarun-portfolio-cache
-    plan: starter
-    ipAllowList: []
-databases:
-  - name: tarun-portfolio-db
-    plan: 0.1c-256mb
-    databaseName: portfolio
-    user: portfolio

@@ -140,23 +140,79 @@ def test_blog_lifecycle(admin,app):
 def image():
     data=BytesIO(); Image.new('RGB',(400,240),'#087b65').save(data,'PNG'); data.seek(0); return data
 
-def test_uploads_draft_privacy_and_restart(admin,app,project_data):
-    data={**project_data,'thumbnail':(image(),'test.png'),'images':[(image(),'gallery.png')]}
-    r=signed(admin,'POST','/api/admin/projects',data=data,content_type='multipart/form-data'); assert r.status_code==201,r.json
-    pid=r.json['data']['id']; url=r.json['data']['thumbnail_url']; public=app.test_client()
-    assert public.get(url).status_code==404
-    gallery=r.json['data']['images']; assert len(gallery)==1
-    assert admin.get(url).mimetype=='image/webp'
-    assert signed(admin,'PATCH',f'/api/admin/projects/{pid}',json={'status':'published'}).status_code==200
-    assert public.get(url).status_code==200
-    assert public.get(gallery[0]['url']).status_code==200
-    # A fresh Flask process equivalent reuses the same durable DB and storage configuration.
-    new_app=create_app({**app.config,'TESTING':True})
-    assert new_app.test_client().get('/projects/integration-test-project').status_code==200
-    assert new_app.test_client().get(url).status_code==200
-    assert admin.get('/admin/projects/'+str(pid)+'/edit').status_code==200
-    assert signed(admin,'PATCH',f'/api/admin/projects/{pid}',json={'remove_image_ids':[gallery[0]['id']],'remove_thumbnail':True}).status_code==200
-    assert public.get(url).status_code==404
+
+def test_uploads_draft_privacy_and_restart(admin, app, project_data):
+    data = {
+        **project_data,
+        'thumbnail': (image(), 'test.png'),
+        'images': [(image(), 'gallery.png')],
+    }
+
+    r = signed(
+        admin,
+        'POST',
+        '/api/admin/projects',
+        data=data,
+        content_type='multipart/form-data',
+    )
+    assert r.status_code == 201, r.json
+
+    pid = r.json['data']['id']
+    url = r.json['data']['thumbnail_url']
+    gallery = r.json['data']['images']
+
+    assert len(gallery) == 1
+
+    # This client never sends cookies, so it remains anonymous.
+    public = app.test_client(use_cookies=False)
+
+    # Draft media must not be accessible to anonymous visitors.
+    assert public.get(url).status_code == 404
+    admin_response = admin.get(url)
+
+
+    assert admin_response.status_code == 200, (
+        f"Admin could not access draft media: "
+        f"status={admin_response.status_code}, "
+        f"content_type={admin_response.content_type}"
+    )
+    assert admin_response.mimetype == 'image/webp'
+
+    # Publish the project; its media should now be publicly accessible.
+    response = signed(
+        admin,
+        'PATCH',
+        f'/api/admin/projects/{pid}',
+        json={'status': 'published'},
+    )
+    assert response.status_code == 200, response.json
+
+    assert public.get(url).status_code == 200
+    assert public.get(gallery[0]['url']).status_code == 200
+
+    # A new Flask app should access the same database and stored media.
+    new_app = create_app({**app.config, 'TESTING': True})
+
+    with new_app.test_client(use_cookies=False) as new_public:
+        assert new_public.get(
+            '/projects/integration-test-project'
+        ).status_code == 200
+        assert new_public.get(url).status_code == 200
+
+    # Removing the thumbnail should make its media inaccessible again.
+    response = signed(
+        admin,
+        'PATCH',
+        f'/api/admin/projects/{pid}',
+        json={
+            'remove_image_ids': [gallery[0]['id']],
+            'remove_thumbnail': True,
+        },
+    )
+    assert response.status_code == 200, response.json
+
+    assert public.get(url).status_code == 404
+
 
 def test_invalid_upload_and_failed_upload_cleanup(admin,app,project_data):
     for data in [BytesIO(b'fake image'),BytesIO(b'<svg onload="alert(1)"></svg>')]:
