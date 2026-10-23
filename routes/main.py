@@ -308,6 +308,18 @@ def media(asset_id):
         or request.args.get('download') == '1'
     )
 
+    # Serve repository-managed static assets from Flask's static folder.
+    if asset.key.startswith("static:"):
+        relative_path = asset.key.removeprefix("static:")
+
+        return send_from_directory(
+            current_app.static_folder,
+            relative_path,
+            mimetype=asset.mimetype,
+            as_attachment=download,
+            download_name=asset.filename,
+        )
+
     if current_app.config['STORAGE_BACKEND'] == 's3':
         params = {
             'Bucket': current_app.config['S3_BUCKET'],
