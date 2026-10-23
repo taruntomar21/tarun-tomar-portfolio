@@ -1,0 +1,328 @@
+from datetime import datetime, timezone
+from functools import wraps
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, abort, session
+from flask_login import login_user, logout_user, login_required, current_user
+from werkzeug.security import check_password_hash, generate_password_hash
+from sqlalchemy import select, func
+from extensions import db, limiter
+from models import *
+from services import ValidationError, text, integer, boolean, email, safe_url, slug, payload, serialize_project
+from storage import save_upload
+bp=Blueprint('admin',__name__)
+# Same-cost hash verification reduces account-enumeration timing differences.
+DUMMY_HASH=generate_password_hash('not-a-real-account-password')
+SCHEMAS={
+ 'skills':(Skill,[('name','text',True,120),('category','text',True,100),('description','textarea',False,5000),('level','text',False,100),('display_order','number',False,100000)]),
+ 'education':(Education,[('title','text',True,180),('organization','text',True,180),('period','text',False,100),('description','textarea',False,10000),('display_order','number',False,100000)]),
+ 'experience':(Experience,[('title','text',True,180),('organization','text',False,180),('period','text',False,100),('kind','text',False,100),('description','textarea',False,10000),('display_order','number',False,100000)]),
+ 'achievements':(Achievement,[('title','text',True,180),('organization','text',False,180),('period','text',False,100),('description','textarea',False,10000),('display_order','number',False,100000)]),
+ 'categories':(ProjectCategory,[('name','text',True,100),('display_order','number',False,100000)])}
+
+def schema(resource):
+    if resource not in SCHEMAS: abort(404)
+    return SCHEMAS[resource]
+
+def assign_entry(obj,fields,data):
+    for name,kind,required,maximum in fields:
+        if name not in data: continue
+        setattr(obj,name,integer(data[name] or 0,name) if kind=='number' else text(data,name,maximum,required))
+    for name,kind,required,maximum in fields:
+        if required and not getattr(obj,name,None): raise ValidationError(name+' is required.')
+
+def apply_project(p,data):
+    for name in ('title','short_description','description','problem','objectives','methodology','results'):
+        if name in data: setattr(p,name,text(data,name,180 if name=='title' else 500 if name=='short_description' else 30000,name in ('title','short_description')))
+    if not p.title or not p.short_description: raise ValidationError('Title and short description are required.')
+    if 'slug' in data: p.slug=slug(text(data,'slug',200,True))
+    if not p.slug: raise ValidationError('Slug is required.')
+    for name in ('github_url','demo_url','dataset_url','documentation_url'):
+        if name in data: setattr(p,name,safe_url(text(data,name,2048)))
+    if 'category_id' in data:
+        cid=data['category_id']
+        p.category_id=integer(cid,'category',1) if cid not in ('',None) else None
+        if p.category_id and not db.session.get(ProjectCategory,p.category_id): raise ValidationError('Category does not exist.')
+    if 'status' in data:
+        if data['status'] not in ('draft','published'): raise ValidationError('Invalid project status.')
+        p.status=data['status']
+    if 'featured' in data: p.featured=boolean(data['featured'])
+    if 'display_order' in data: p.display_order=integer(data['display_order'] or 0,'display order')
+    if 'technologies' in data:
+        names=data['technologies']
+        if isinstance(names,str): names=names.split(',')
+        if not isinstance(names,list) or len(names)>30 or any(not isinstance(v,str) or len(v.strip())>80 for v in names): raise ValidationError('Use up to 30 technology names, 80 characters each.')
+        p.technologies=[]
+        for name in dict.fromkeys(n.strip() for n in names if n.strip()):
+            tech=db.session.scalar(select(Technology).where(Technology.name==name))
+            if not tech: tech=Technology(name=name); db.session.add(tech); db.session.flush()
+            p.technologies.append(tech)
+    # Existing images can be removed or reordered, without trusting arbitrary asset IDs.
+    if 'remove_image_ids' in data:
+        ids=data['remove_image_ids']
+        if isinstance(ids,str): ids=[v for v in ids.split(',') if v]
+        if not isinstance(ids,list): raise ValidationError('Image IDs must be a list.')
+        ids={integer(v,'image ID',1) for v in ids}
+        p.images[:]=[i for i in p.images if i.id not in ids]
+    if 'image_order' in data:
+        ids=data['image_order']
+        if isinstance(ids,str): ids=[v for v in ids.split(',') if v]
+        if not isinstance(ids,list): raise ValidationError('Image order must be a list.')
+        order=[integer(v,'image ID',1) for v in ids]
+        for image in p.images:
+            if image.id in order: image.display_order=order.index(image.id)
+    for image in p.images:
+        if 'image_alt_'+str(image.id) in data: image.alt=text(data,'image_alt_'+str(image.id),255)
+    if boolean(data.get('remove_thumbnail',False)): p.thumbnail=None
+    thumb=save_upload(request.files.get('thumbnail'))
+    if thumb: p.thumbnail=thumb
+    uploads=[f for f in request.files.getlist('images') if f.filename]
+    if len(p.images)+len(uploads)>20: raise ValidationError('Maximum 20 gallery images per project.')
+    for i,upload in enumerate(uploads):
+        asset=save_upload(upload)
+        p.images.append(ProjectImage(asset=asset,alt=p.title+' — project image',display_order=len(p.images)))
+    p.updated_at=datetime.now(timezone.utc)
+
+def apply_post(post,data):
+    for name in ('title','summary','body','category'):
+        if name in data: setattr(post,name,text(data,name,180 if name=='title' else 500 if name=='summary' else 100 if name=='category' else 100000,name=='title'))
+    if not post.title: raise ValidationError('Title is required.')
+    if 'slug' in data: post.slug=slug(text(data,'slug',200,True))
+    if not post.slug: raise ValidationError('Slug is required.')
+    if 'tags' in data:
+        tags=data['tags'].split(',') if isinstance(data['tags'],str) else data['tags']
+        if not isinstance(tags,list) or len(tags)>30 or any(not isinstance(t,str) or len(t)>80 for t in tags): raise ValidationError('Use up to 30 short tags.')
+        post.tags=list(dict.fromkeys(t.strip() for t in tags if t.strip()))
+    if 'status' in data:
+        if data['status'] not in ('draft','published'): raise ValidationError('Invalid publication status.')
+        post.status=data['status']
+        if post.status=='published' and not post.published_at: post.published_at=datetime.now(timezone.utc)
+    if boolean(data.get('remove_thumbnail',False)): post.thumbnail=None
+    thumb=save_upload(request.files.get('thumbnail'))
+    if thumb: post.thumbnail=thumb
+
+def apply_profile(p,data):
+    for name in ('name','headline','introduction','about','goals','contact_info','seo_description'):
+        if name in data: setattr(p,name,text(data,name,120 if name=='name' else 300 if name in ('headline','seo_description') else 10000,name=='name'))
+    if 'email' in data: p.email=email(text(data,'email',254),required=False)
+    for name in ('github_url','linkedin_url'):
+        if name in data: setattr(p,name,safe_url(text(data,name,2048)))
+    for name in ('photo','resume'):
+        if boolean(data.get('remove_'+name,False)): setattr(p,name,None)
+        asset=save_upload(request.files.get(name),'resume' if name=='resume' else 'profile')
+        if asset: setattr(p,name,asset)
+
+@bp.route('/admin/login',methods=['GET','POST'])
+@limiter.limit('5 per minute; 30 per hour',methods=['POST'])
+def login_view():
+    if current_user.is_authenticated: return redirect(url_for('admin.dashboard'))
+    if request.method=='POST':
+        address=text(request.form,'email',254).lower(); password=request.form.get('password','')
+        if len(password)>512: raise ValidationError('Password exceeds maximum length.')
+        user=db.session.scalar(select(AdminUser).where(AdminUser.email==address))
+        valid=check_password_hash(user.password_hash if user else DUMMY_HASH,password)
+        if user and valid:
+            session.clear(); session.permanent=True; login_user(user,fresh=True)
+            return redirect(url_for('admin.dashboard'))
+        flash('Email or password is incorrect.','error')
+        return render_template('admin/login.html',title='Admin sign in'),401
+    return render_template('admin/login.html',title='Admin sign in')
+
+@bp.post('/admin/logout')
+@login_required
+def logout(): logout_user(); session.clear(); return redirect(url_for('admin.login_view'))
+
+@bp.get('/admin')
+@login_required
+def dashboard():
+    counts={name:db.session.query(Project).filter(*where).count() for name,where in {'Total projects':[],'Published':[Project.status=='published'],'Drafts':[Project.status=='draft'],'Featured':[Project.featured.is_(True)]}.items()}
+    counts['Contact messages']=db.session.query(ContactMessage).count()
+    recent=db.session.scalars(select(Project).order_by(Project.updated_at.desc()).limit(6)).all()
+    return render_template('admin/dashboard.html',title='Overview',counts=counts,recent=recent)
+
+@bp.get('/admin/projects')
+@login_required
+def projects():
+    page=db.paginate(select(Project).order_by(Project.updated_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+    return render_template('admin/projects.html',title='Projects',pagination=page)
+
+@bp.route('/admin/projects/new',methods=['GET','POST'])
+@bp.route('/admin/projects/<int:pid>/edit',methods=['GET','POST'])
+@login_required
+def project_form(pid=None):
+    p=db.get_or_404(Project,pid) if pid else Project(status='draft',featured=False,display_order=0)
+    if request.method=='POST':
+        data=payload(); data['featured']=request.form.get('featured','false')
+        apply_project(p,data); db.session.add(p); db.session.commit(); flash('Project saved.','success')
+        return redirect(url_for('admin.projects'))
+    return render_template('admin/project_form.html',title='Edit project' if pid else 'New project',project=p,categories=db.session.scalars(select(ProjectCategory).order_by(ProjectCategory.display_order)).all())
+
+@bp.post('/admin/projects/<int:pid>/delete')
+@login_required
+def delete_project(pid):
+    if request.form.get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+    db.session.delete(db.get_or_404(Project,pid)); db.session.commit(); flash('Project deleted.','success'); return redirect(url_for('admin.projects'))
+
+@bp.post('/admin/projects/<int:pid>/<action>')
+@login_required
+def project_action(pid,action):
+    p=db.get_or_404(Project,pid)
+    if action=='publish': p.status='draft' if p.status=='published' else 'published'
+    elif action=='feature': p.featured=not p.featured
+    else: abort(404)
+    db.session.commit(); return redirect(url_for('admin.projects'))
+
+@bp.route('/admin/profile',methods=['GET','POST'])
+@login_required
+def profile_editor():
+    p=db.session.get(Profile,1) or Profile(id=1)
+    if request.method=='POST':
+        apply_profile(p,payload()); db.session.add(p); db.session.commit(); flash('Profile updated.','success'); return redirect(url_for('admin.profile_editor'))
+    return render_template('admin/profile.html',title='Profile & resume',profile=p)
+
+@bp.route('/admin/content/<resource>',methods=['GET','POST'])
+@bp.route('/admin/content/<resource>/<int:eid>/edit',methods=['GET','POST'])
+@login_required
+def content(resource,eid=None):
+    model,fields=schema(resource); obj=db.get_or_404(model,eid) if eid else model()
+    if request.method=='POST':
+        assign_entry(obj,fields,payload()); db.session.add(obj); db.session.commit(); flash('Entry saved.','success'); return redirect(url_for('admin.content',resource=resource))
+    return render_template('admin/content.html',title=resource.title(),resource=resource,fields=fields,obj=obj,items=db.session.scalars(select(model).order_by(model.display_order,model.id)).all())
+
+@bp.post('/admin/content/<resource>/<int:eid>/delete')
+@login_required
+def delete_entry(resource,eid):
+    model,_=schema(resource)
+    if request.form.get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+    obj=db.get_or_404(model,eid)
+    if model is ProjectCategory:
+        for p in db.session.scalars(select(Project).where(Project.category_id==eid)): p.category_id=None
+    db.session.delete(obj); db.session.commit(); flash('Entry deleted.','success'); return redirect(url_for('admin.content',resource=resource))
+
+@bp.get('/admin/messages')
+@login_required
+def messages():
+    query=select(ContactMessage)
+    if request.args.get('archived')!='all': query=query.where(ContactMessage.archived==(request.args.get('archived')=='1'))
+    page=db.paginate(query.order_by(ContactMessage.created_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+    return render_template('admin/messages.html',title='Inbox',pagination=page)
+
+@bp.post('/admin/messages/<int:mid>/<action>')
+@login_required
+def message_action(mid,action):
+    m=db.get_or_404(ContactMessage,mid)
+    if action=='archive': m.archived=not m.archived
+    elif action=='read': m.read=True
+    elif action=='delete':
+        if request.form.get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+        db.session.delete(m)
+    else: abort(404)
+    db.session.commit(); return redirect(url_for('admin.messages',archived=request.args.get('archived','')))
+
+@bp.get('/admin/blog')
+@login_required
+def blog():
+    page=db.paginate(select(BlogPost).order_by(BlogPost.updated_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+    return render_template('admin/blog.html',title='Articles',pagination=page)
+
+@bp.route('/admin/blog/new',methods=['GET','POST'])
+@bp.route('/admin/blog/<int:pid>/edit',methods=['GET','POST'])
+@login_required
+def blog_form(pid=None):
+    p=db.get_or_404(BlogPost,pid) if pid else BlogPost(status='draft')
+    if request.method=='POST':
+        apply_post(p,payload()); db.session.add(p); db.session.commit(); flash('Article saved.','success'); return redirect(url_for('admin.blog'))
+    return render_template('admin/blog_form.html',title='Edit article' if pid else 'New article',post=p)
+
+@bp.post('/admin/blog/<int:pid>/delete')
+@login_required
+def blog_delete(pid):
+    if request.form.get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+    db.session.delete(db.get_or_404(BlogPost,pid)); db.session.commit(); return redirect(url_for('admin.blog'))
+
+# JSON / multipart admin API. Authentication and CSRF apply to every mutation.
+@bp.get('/api/auth/session')
+def auth_session():
+    from flask_wtf.csrf import generate_csrf
+    return jsonify(authenticated=current_user.is_authenticated,csrf_token=generate_csrf())
+
+@bp.post('/api/auth/login')
+@limiter.limit('5 per minute; 30 per hour')
+def auth_login():
+    data=payload(); address=text(data,'email',254).lower(); password=data.get('password','')
+    if not isinstance(password,str) or len(password)>512: raise ValidationError('Invalid password input.')
+    user=db.session.scalar(select(AdminUser).where(AdminUser.email==address))
+    valid=check_password_hash(user.password_hash if user else DUMMY_HASH,password)
+    if not user or not valid: return jsonify(error={'code':401,'message':'Email or password is incorrect.'}),401
+    session.clear(); session.permanent=True; login_user(user,fresh=True)
+    return jsonify(message='Signed in. Fetch /api/auth/session for a fresh CSRF token.')
+
+@bp.post('/api/auth/logout')
+@login_required
+def auth_logout(): logout_user(); session.clear(); return jsonify(message='Signed out.')
+
+@bp.route('/api/admin/projects',methods=['GET','POST'])
+@bp.route('/api/admin/projects/<int:pid>',methods=['GET','PATCH','DELETE'])
+@login_required
+def api_projects(pid=None):
+    if request.method=='GET':
+        if pid: return jsonify(data=serialize_project(db.get_or_404(Project,pid),True))
+        page=db.paginate(select(Project).order_by(Project.updated_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+        return jsonify(data=[serialize_project(p,True) for p in page.items],pagination={'page':page.page,'pages':page.pages,'total':page.total})
+    if request.method=='DELETE':
+        if not pid: abort(405)
+        if payload().get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+        db.session.delete(db.get_or_404(Project,pid)); db.session.commit(); return '',204
+    if request.method=='PATCH' and not pid or request.method=='POST' and pid: abort(405)
+    p=db.get_or_404(Project,pid) if pid else Project(status='draft',featured=False,display_order=0)
+    apply_project(p,payload()); db.session.add(p); db.session.commit(); return jsonify(data=serialize_project(p,True)),200 if pid else 201
+
+@bp.route('/api/admin/profile',methods=['GET','PATCH','POST'])
+@login_required
+def api_profile():
+    p=db.session.get(Profile,1) or Profile(id=1)
+    if request.method!='GET': apply_profile(p,payload()); db.session.add(p); db.session.commit()
+    return jsonify(data={k:getattr(p,k) for k in ('name','headline','introduction','about','goals','email','contact_info','github_url','linkedin_url','seo_description','photo_id','resume_id')})
+
+@bp.route('/api/admin/content/<resource>',methods=['GET','POST'])
+@bp.route('/api/admin/content/<resource>/<int:eid>',methods=['PATCH','DELETE'])
+@login_required
+def api_content(resource,eid=None):
+    model,fields=schema(resource)
+    def serialize(obj): return {'id':obj.id,**{f[0]:getattr(obj,f[0]) for f in fields}}
+    if request.method=='GET': return jsonify(data=[serialize(o) for o in db.session.scalars(select(model).order_by(model.display_order,model.id))])
+    obj=db.get_or_404(model,eid) if eid else model()
+    if request.method=='DELETE':
+        if payload().get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+        if model is ProjectCategory:
+            for p in db.session.scalars(select(Project).where(Project.category_id==eid)): p.category_id=None
+        db.session.delete(obj); db.session.commit(); return '',204
+    assign_entry(obj,fields,payload()); db.session.add(obj); db.session.commit(); return jsonify(data=serialize(obj)),200 if eid else 201
+
+@bp.route('/api/admin/blog',methods=['GET','POST'])
+@bp.route('/api/admin/blog/<int:pid>',methods=['GET','PATCH','DELETE'])
+@login_required
+def api_blog(pid=None):
+    def serialize(p): return {k:getattr(p,k) for k in ('id','title','slug','summary','body','category','tags','status','thumbnail_id')}
+    if request.method=='GET':
+        if pid: return jsonify(data=serialize(db.get_or_404(BlogPost,pid)))
+        page=db.paginate(select(BlogPost).order_by(BlogPost.updated_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+        return jsonify(data=[serialize(p) for p in page.items],pagination={'page':page.page,'pages':page.pages,'total':page.total})
+    p=db.get_or_404(BlogPost,pid) if pid else BlogPost(status='draft')
+    if request.method=='DELETE':
+        if payload().get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+        db.session.delete(p); db.session.commit(); return '',204
+    apply_post(p,payload()); db.session.add(p); db.session.commit(); return jsonify(data=serialize(p)),200 if pid else 201
+
+@bp.route('/api/admin/messages',methods=['GET'])
+@bp.route('/api/admin/messages/<int:mid>',methods=['PATCH','DELETE'])
+@login_required
+def api_messages(mid=None):
+    if request.method=='GET':
+        page=db.paginate(select(ContactMessage).order_by(ContactMessage.created_at.desc()),page=integer(request.args.get('page',1),'page',1),per_page=20,error_out=False)
+        return jsonify(data=[{k:getattr(m,k) for k in ('id','name','email','subject','message','archived','read','created_at')} for m in page.items],pagination={'page':page.page,'pages':page.pages,'total':page.total})
+    m=db.get_or_404(ContactMessage,mid); data=payload()
+    if request.method=='DELETE':
+        if data.get('confirm')!='delete': raise ValidationError('Deletion confirmation is required.')
+        db.session.delete(m); db.session.commit(); return '',204
+    for field in ('read','archived'):
+        if field in data: setattr(m,field,boolean(data[field]))
+    db.session.commit(); return jsonify(message='Message updated.')

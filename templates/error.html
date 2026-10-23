@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<section class="container error-page"><span class="eyebrow">{{ code }}</span><h1>{{ 'A little off the map.' if code==404 else 'Let’s try that again.' }}</h1><p class="lead">{{ message }}</p><a class="button primary" href="/">Back to home <i data-lucide="arrow-right"></i></a></section>{% endblock %}

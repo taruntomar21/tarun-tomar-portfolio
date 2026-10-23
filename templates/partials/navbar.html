@@ -1,0 +1,7 @@
+<header class="site-header"><div class="container nav-wrap">
+<a class="brand" href="{{ url_for('main.index') }}" aria-label="{{ site.name }} home"><span class="brand-mark">t<span>.</span></span><span>{{ site.name }}<small>DATA & TECHNOLOGY</small></span></a>
+<nav id="primary-nav" aria-label="Main navigation">
+{% for endpoint,label in [('index','Home'),('about','About'),('projects','Projects'),('skills','Skills'),('experience','Experience'),('resume','Resume'),('blog','Blog')] %}<a href="{{ url_for('main.'+endpoint) }}" {% if request.endpoint=='main.'+endpoint or endpoint=='projects' and request.endpoint=='main.project_detail' or endpoint=='blog' and request.endpoint=='main.blog_detail' %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+<a class="nav-contact" href="{{ url_for('main.contact') }}" {% if request.endpoint=='main.contact' %}aria-current="page"{% endif %}>Let's talk <i data-lucide="arrow-up-right"></i></a>
+</nav><div class="nav-controls"><button class="icon-button" id="theme-toggle" aria-label="Switch color theme"><i data-lucide="sun-moon"></i></button><button class="icon-button menu-toggle" id="menu-toggle" aria-label="Open navigation" aria-controls="primary-nav" aria-expanded="false"><i data-lucide="menu"></i></button></div>
+</div></header>

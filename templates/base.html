@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<title>{{ title }} · {{ site.name }}</title>
+<meta name="description" content="{{ meta_description|default(site.seo_description, true) }}">
+<meta name="color-scheme" content="light dark">
+<link rel="canonical" href="{{ canonical }}">
+<meta property="og:type" content="website"><meta property="og:title" content="{{ title }} · {{ site.name }}">
+<meta property="og:description" content="{{ meta_description|default(site.seo_description, true) }}"><meta property="og:url" content="{{ canonical }}">
+<meta property="og:image" content="{{ config.SITE_URL }}{{ url_for('static',filename='images/og-card.png') }}">
+<link rel="icon" href="{{ url_for('static',filename='favicon.ico') }}" sizes="any">
+<script src="{{ url_for('static',filename='js/theme.js') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static',filename='css/style.css') }}"><link rel="stylesheet" href="{{ url_for('static',filename='css/responsive.css') }}"><link rel="stylesheet" href="{{ url_for('static',filename='css/animations.css') }}">
+{% block head %}{% endblock %}
+<script defer src="{{ url_for('static',filename='vendor/lucide.min.js') }}"></script>
+<script type="module" src="{{ url_for('static',filename='js/main.js') }}"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+{% include 'partials/navbar.html' %}
+{% with messages=get_flashed_messages(with_categories=true) %}{% if messages %}<div class="container notices" role="status">{% for category,message in messages %}<p class="notice {{ category }}">{{ message }}</p>{% endfor %}</div>{% endif %}{% endwith %}
+<main id="main">{% block content %}{% endblock %}</main>
+{% include 'partials/footer.html' %}
+</body></html>
