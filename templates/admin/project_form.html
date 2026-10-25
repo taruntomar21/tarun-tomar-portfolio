@@ -157,6 +157,18 @@
       Feature on homepage (up to three, ordered by display order)
     </label>
 
+
+    <label class="checkbox">
+      <input
+        type="checkbox"
+        name="is_in_progress"
+        value="true"
+        {% if project.is_in_progress %}checked{% endif %}
+      >
+      Currently working on this project — display an In Progress badge
+    </label>
+
+
     {% if project.id %}
     <p class="small muted">Project ID {{ project.id }} · Created {{ project.created_at|date }} · Updated {{ project.updated_at|date }}</p>
     {% endif %}

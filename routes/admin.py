@@ -206,6 +206,9 @@ def apply_project(p, data):
     if "featured" in data:
         p.featured = boolean(data["featured"])
 
+    if "is_in_progress" in data:
+        p.is_in_progress = boolean(data["is_in_progress"])
+
     if "display_order" in data:
         p.display_order = integer(
             data["display_order"] or 0,
@@ -632,6 +635,9 @@ def project_form(pid=None):
     if request.method == "POST":
         data = payload()
         data["featured"] = request.form.get("featured", "false")
+        data["is_in_progress"] = request.form.get(
+            "is_in_progress", "false"
+        )
 
         apply_project(p, data)
         db.session.add(p)

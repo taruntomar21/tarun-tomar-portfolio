@@ -57,6 +57,7 @@ class Project(Timestamp, db.Model):
     dataset_url = db.Column(db.String(2048), default='', nullable=False)
     documentation_url = db.Column(db.String(2048), default='', nullable=False)
     featured = db.Column(db.Boolean, default=False, nullable=False)
+    is_in_progress = db.Column(db.Boolean,default=False,nullable=False)
     status = db.Column(db.String(20), default='draft', index=True, nullable=False)
     display_order = db.Column(db.Integer, default=0, nullable=False)
     technologies = db.relationship(Technology, secondary=project_technology, lazy='selectin')
