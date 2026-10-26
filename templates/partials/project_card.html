@@ -6,5 +6,6 @@
 {% if project.is_in_progress %}
   <span class="progress-label">In Progress</span>
 {% endif %}
+</a>
 
 <div class="project-content"><span class="eyebrow">{{ project.category.name if project.category else 'Independent project' }}</span><h3><a href="{{ url_for('main.project_detail',slug=project.slug) }}">{{ project.title }}</a></h3><p>{{ project.short_description }}</p><div class="tags">{% for tech in project.technologies[:5] %}<span class="tag">{{ tech.name }}</span>{% endfor %}</div><div class="project-links"><a class="text-link" href="{{ url_for('main.project_detail',slug=project.slug) }}">View case study <i data-lucide="arrow-up-right"></i></a><div>{% if project.github_url %}<a href="{{ project.github_url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ project.title }} on GitHub"><i data-lucide="github"></i></a>{% endif %}{% if project.demo_url %}<a href="{{ project.demo_url }}" target="_blank" rel="noopener noreferrer" aria-label="{{ project.title }} live demo"><i data-lucide="external-link"></i></a>{% endif %}</div></div></div></article>
